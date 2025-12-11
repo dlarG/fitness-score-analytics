@@ -12,15 +12,16 @@ async def get_fitness_scores(
     age_min: int = Query(18, ge=18, le=100),
     age_max: int = Query(65, ge=18, le=100),
     genders: List[str] = Query(["Male", "Female"]),
+    workout_types: List[str] = Query([]),
     db: Session = Depends(get_db)
 ):
     """Get fitness efficiency scores with filters - FIXED QUERY"""
-    # Convert genders list to SQL-safe format
-    genders_str = "', '".join(genders)
-    genders_clause = f"'{genders_str}'"
     
-    # Use the ORIGINAL working query from your notebook
-    query = f"""
+    # Debug logging
+    print(f"Backend received filters: age={age_min}-{age_max}, genders={genders}, workout_types={workout_types}")
+    
+    # Create a proper parameterized query
+    base_query = """
     SELECT 
         p.participant_id,
         p.age,
@@ -36,19 +37,127 @@ async def get_fitness_scores(
         ) AS fitness_score
     FROM dim_participant p
     JOIN fact_workout_session w ON p.participant_id = w.participant_id
+    JOIN dim_workout w_type ON w.workout_id = w_type.workout_id
     JOIN fact_nutrition_intake n ON p.participant_id = n.participant_id
     WHERE p.age BETWEEN %(age_min)s AND %(age_max)s
-        AND p.gender IN ({genders_clause})
+    """
+    
+    # Build parameters dictionary
+    params = {
+        'age_min': age_min, 
+        'age_max': age_max
+    }
+    
+    # Add gender filter with proper parameterization
+    if genders and len(genders) > 0:
+        # Create placeholders for genders
+        gender_placeholders = []
+        for i, gender in enumerate(genders):
+            placeholder = f"gender_{i}"
+            gender_placeholders.append(f"%({placeholder})s")
+            params[placeholder] = gender
+        
+        gender_clause = f"AND p.gender IN ({', '.join(gender_placeholders)})"
+        base_query += gender_clause
+    
+    # Add workout type filter
+    if workout_types and len(workout_types) > 0:
+        workout_placeholders = []
+        for i, workout in enumerate(workout_types):
+            placeholder = f"workout_{i}"
+            workout_placeholders.append(f"%({placeholder})s")
+            params[placeholder] = workout
+        
+        workout_clause = f"AND w_type.workout_type IN ({', '.join(workout_placeholders)})"
+        base_query += workout_clause
+    
+    # Complete the query
+    base_query += """
     GROUP BY p.participant_id, p.age, p.gender, p.weight_kg
     ORDER BY fitness_score DESC
     LIMIT 25
     """
     
-    df = pd.read_sql_query(
-        query, 
-        db.bind, 
-        params={'age_min': age_min, 'age_max': age_max}
-    )
+    print(f"Executing query with params: {params}")
+    
+    df = pd.read_sql_query(base_query, db.bind, params=params)
+    
+    print(f"Query returned {len(df)} rows")
+    if len(df) > 0:
+        print(f"Sample genders in result: {df['gender'].unique()}")
+    
+    return df.to_dict('records')
+
+@router.get("/nutrition-body", response_model=List[KPINutritionBody])
+async def get_nutrition_body(
+    age_min: int = Query(18, ge=18, le=100),
+    age_max: int = Query(65, ge=18, le=100),
+    genders: List[str] = Query(["Male", "Female"]),
+    workout_types: List[str] = Query([]),
+    db: Session = Depends(get_db)
+):
+    """Get nutrition and body composition data"""
+    
+    print(f"Nutrition endpoint - Backend received filters: age={age_min}-{age_max}, genders={genders}, workout_types={workout_types}")
+    
+    base_query = """
+    SELECT 
+        p.participant_id,
+        p.age,
+        p.gender,
+        p.fat_percentage,
+        ROUND(AVG(n.protein_g), 2) AS avg_daily_protein,
+        ROUND(AVG(n.carbs_g), 2) AS avg_daily_carbs,
+        ROUND(AVG(n.fats_g), 2) AS avg_daily_fats,
+        ROUND(AVG(n.sugar_g), 2) AS avg_daily_sugar,
+        ROUND(AVG(w.calories_burned), 2) AS avg_daily_calories_burned
+    FROM dim_participant p
+    JOIN fact_nutrition_intake n ON p.participant_id = n.participant_id
+    JOIN fact_workout_session w ON p.participant_id = w.participant_id
+    JOIN dim_workout w_type ON w.workout_id = w_type.workout_id
+    WHERE p.age BETWEEN %(age_min)s AND %(age_max)s
+        AND n.protein_g > 0
+        AND w.calories_burned > 0
+    """
+    
+    params = {'age_min': age_min, 'age_max': age_max}
+    
+    # Add gender filter
+    if genders and len(genders) > 0:
+        gender_placeholders = []
+        for i, gender in enumerate(genders):
+            placeholder = f"gender_{i}"
+            gender_placeholders.append(f"%({placeholder})s")
+            params[placeholder] = gender
+        
+        gender_clause = f"AND p.gender IN ({', '.join(gender_placeholders)})"
+        base_query += gender_clause
+    
+    # Add workout type filter
+    if workout_types and len(workout_types) > 0:
+        workout_placeholders = []
+        for i, workout in enumerate(workout_types):
+            placeholder = f"workout_{i}"
+            workout_placeholders.append(f"%({placeholder})s")
+            params[placeholder] = workout
+        
+        workout_clause = f"AND w_type.workout_type IN ({', '.join(workout_placeholders)})"
+        base_query += workout_clause
+    
+    base_query += """
+    GROUP BY p.participant_id, p.age, p.gender, p.fat_percentage
+    ORDER BY p.fat_percentage ASC
+    LIMIT 30
+    """
+    
+    print(f"Nutrition query params: {params}")
+    
+    df = pd.read_sql_query(base_query, db.bind, params=params)
+    
+    print(f"Nutrition query returned {len(df)} rows")
+    if len(df) > 0:
+        print(f"Nutrition sample genders: {df['gender'].unique()}")
+    
     return df.to_dict('records')
 
 @router.get("/exercise-effectiveness", response_model=List[KPIExerciseEffectiveness])
@@ -72,47 +181,6 @@ async def get_exercise_effectiveness(db: Session = Depends(get_db)):
     """
     
     df = pd.read_sql_query(query, db.bind)
-    return df.to_dict('records')
-
-@router.get("/nutrition-body", response_model=List[KPINutritionBody])
-async def get_nutrition_body(
-    age_min: int = Query(18, ge=18, le=100),
-    age_max: int = Query(65, ge=18, le=100),
-    genders: List[str] = Query(["Male", "Female"]),
-    db: Session = Depends(get_db)
-):
-    """Get nutrition and body composition data"""
-    genders_str = "', '".join(genders)
-    genders_clause = f"'{genders_str}'"
-    
-    query = f"""
-    SELECT 
-        p.participant_id,
-        p.age,
-        p.gender,
-        p.fat_percentage,
-        ROUND(AVG(n.protein_g), 2) AS avg_daily_protein,
-        ROUND(AVG(n.carbs_g), 2) AS avg_daily_carbs,
-        ROUND(AVG(n.fats_g), 2) AS avg_daily_fats,
-        ROUND(AVG(n.sugar_g), 2) AS avg_daily_sugar,
-        ROUND(AVG(w.calories_burned), 2) AS avg_daily_calories_burned
-    FROM dim_participant p
-    JOIN fact_nutrition_intake n ON p.participant_id = n.participant_id
-    JOIN fact_workout_session w ON p.participant_id = w.participant_id
-    WHERE p.age BETWEEN %(age_min)s AND %(age_max)s
-        AND p.gender IN ({genders_clause})
-        AND n.protein_g > 0
-        AND w.calories_burned > 0
-    GROUP BY p.participant_id, p.age, p.gender, p.fat_percentage
-    ORDER BY p.fat_percentage ASC
-    LIMIT 30
-    """
-    
-    df = pd.read_sql_query(
-        query, 
-        db.bind, 
-        params={'age_min': age_min, 'age_max': age_max}
-    )
     return df.to_dict('records')
 
 @router.get("/workout-performance", response_model=List[KPIWorkoutPerformance])
@@ -145,14 +213,14 @@ async def get_lifestyle_balance(
     age_min: int = Query(18, ge=18, le=100),
     age_max: int = Query(65, ge=18, le=100),
     genders: List[str] = Query(["Male", "Female"]),
+    workout_types: List[str] = Query([]),
     db: Session = Depends(get_db)
 ):
     """Get lifestyle balance index - FIXED QUERY"""
-    genders_str = "', '".join(genders)
-    genders_clause = f"'{genders_str}'"
     
-    # Split the query to avoid complex nested calculations
-    query = f"""
+    print(f"Lifestyle endpoint - Backend received filters: age={age_min}-{age_max}, genders={genders}, workout_types={workout_types}")
+    
+    base_query = """
     SELECT 
         p.participant_id,
         p.age,
@@ -180,20 +248,49 @@ async def get_lifestyle_balance(
     FROM dim_participant p
     JOIN fact_nutrition_intake n ON p.participant_id = n.participant_id
     JOIN fact_workout_session w ON p.participant_id = w.participant_id
+    JOIN dim_workout w_type ON w.workout_id = w_type.workout_id
     WHERE p.age BETWEEN %(age_min)s AND %(age_max)s
-        AND p.gender IN ({genders_clause})
         AND w.session_duration_hr > 0
         AND n.protein_g > 0
+    """
+    
+    params = {'age_min': age_min, 'age_max': age_max}
+    
+    # Add gender filter
+    if genders and len(genders) > 0:
+        gender_placeholders = []
+        for i, gender in enumerate(genders):
+            placeholder = f"gender_{i}"
+            gender_placeholders.append(f"%({placeholder})s")
+            params[placeholder] = gender
+        
+        gender_clause = f"AND p.gender IN ({', '.join(gender_placeholders)})"
+        base_query += gender_clause
+    
+    # Add workout type filter
+    if workout_types and len(workout_types) > 0:
+        workout_placeholders = []
+        for i, workout in enumerate(workout_types):
+            placeholder = f"workout_{i}"
+            workout_placeholders.append(f"%({placeholder})s")
+            params[placeholder] = workout
+        
+        workout_clause = f"AND w_type.workout_type IN ({', '.join(workout_placeholders)})"
+        base_query += workout_clause
+    
+    base_query += """
     GROUP BY p.participant_id, p.age, p.gender
     ORDER BY p.participant_id
     LIMIT 50
     """
     
-    df = pd.read_sql_query(
-        query, 
-        db.bind, 
-        params={'age_min': age_min, 'age_max': age_max}
-    )
+    print(f"Lifestyle query params: {params}")
+    
+    df = pd.read_sql_query(base_query, db.bind, params=params)
+    
+    print(f"Lifestyle query returned {len(df)} rows")
+    if len(df) > 0:
+        print(f"Lifestyle sample genders: {df['gender'].unique()}")
     
     # Calculate lifestyle_balance_index in Python
     df['lifestyle_balance_index'] = round((df['nutrition_score'] + df['exercise_score'] + df['recovery_score']) / 3, 1)

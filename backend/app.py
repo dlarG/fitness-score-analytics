@@ -34,7 +34,6 @@ async def health_check():
 async def test_endpoint():
     return {"test": "Backend is responding", "data": [1, 2, 3]}
 
-# Include routers
 try:
     app.include_router(kpi_routes.router)
     app.include_router(filter_routes.router)
